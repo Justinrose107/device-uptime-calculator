@@ -441,7 +441,7 @@ footer span:first-child { color: white; font-weight: 750; }
               <li>A case is counted only when Case Occurs Time is on or after the device calculation start and before the selected period end.</li>
               <li>For Down, Downtime Recover Time is required and must be earlier than the selected period end. A case that recovers after the selected period is not counted.</li>
               <li>For Limited Use, Service Complete Time is required and must be earlier than the selected period end; downtime then equals Total Working Time directly.</li>
-              <li>If an in-period Down case has no valid Downtime Recover Time, or an in-period Limited Use case has no valid Service Complete Time, that entire Asset and its theoretical operation hours are excluded from the final calculation.</li>
+              <li>If an in-period Down case has no valid Downtime Recover Time, or an in-period Limited Use case has no valid Service Complete Time, only that case is excluded from downtime. The Asset, its theoretical operation hours, and its other eligible completed cases remain included.</li>
               <li>A Limited Use row with blank, zero, negative, or invalid Total Working Time is excluded from Downtime and Uptime calculations.</li>
               <li>Down intervals belonging to the same device are merged; duplicate, overlapping, or adjacent Down time is counted only once.</li>
               <li>Limited Use is not converted into an interval and is not overlap-adjusted against Down. Total Downtime Hours = Down Downtime Hours + Limited Use Downtime Hours.</li>
@@ -1183,14 +1183,14 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
         downtimeDetail: [],
         downCaseDetail: [],
         limitedUseCaseDetail: [],
-        excludedIncompleteAssets: [],
+        excludedIncompleteCases: [],
         mergedIntervals: {},
         mergedIntervalsByStatus: {},
         summary: {
           "Asset Count": 0,
           "Fault Asset Count": 0,
           "Normal Asset Count": 0,
-          "Incomplete Asset Exclusion Count": 0,
+          "Incomplete Case Exclusion Count": 0,
           "Total Theoretical Hours": 0,
           "Down Downtime Hours": 0,
           "Limited Use Downtime Hours": 0,
@@ -1215,8 +1215,7 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
       downtimeCasesByAsset.get(key).push(row);
     });
 
-    const excludedIncompleteAssets = [];
-    const excludedIncompleteKeys = new Set();
+    const excludedIncompleteCases = [];
     baseCatalog.forEach((assetInfo) => {
       const key = assetInfo.__asset_key;
       const installation = assetInfo["Installation End Date"];
@@ -1229,20 +1228,19 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
         const status = String(record["Device Status Before Service"] ?? "").trim().toLocaleLowerCase();
         const requiredField = status === "limited use" ? "Service Complete Time" : "Downtime Recover Time";
         if (!record[`__blank__${requiredField}`] && !record[`__invalid__${requiredField}`] && record[requiredField]) return;
-        if (excludedIncompleteKeys.has(key)) return;
-        excludedIncompleteKeys.add(key);
-        excludedIncompleteAssets.push({
+        excludedIncompleteCases.push({
           Asset: String(assetInfo.Asset),
           Case: record.Case,
           "Work Order Number": record["Work Order Number"],
+          "Source Row": record.__source_row,
           "Service Status": status === "limited use" ? "Limited Use" : "Down",
           "Case Occurs Time": occurs,
           "Required End Field": requiredField,
-          "Exclusion Reason": `Asset excluded because an in-period ${status === "limited use" ? "Limited Use" : "Down"} case has no valid ${requiredField}.`,
+          "Exclusion Reason": `Only this ${status === "limited use" ? "Limited Use" : "Down"} case is excluded from downtime because it has no valid ${requiredField}. The Asset, theoretical operation hours, and other eligible completed cases remain included.`,
         });
       });
     });
-    const catalog = baseCatalog.filter((row) => !excludedIncompleteKeys.has(row.__asset_key));
+    const catalog = baseCatalog;
 
     const assetUptime = [];
     const downtimeDetail = [];
@@ -1387,14 +1385,14 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
       downtimeDetail,
       downCaseDetail,
       limitedUseCaseDetail,
-      excludedIncompleteAssets,
+      excludedIncompleteCases,
       mergedIntervals,
       mergedIntervalsByStatus,
       summary: {
         "Asset Count": assetUptime.length,
         "Fault Asset Count": faultAssetCount,
         "Normal Asset Count": assetUptime.length - faultAssetCount,
-        "Incomplete Asset Exclusion Count": excludedIncompleteAssets.length,
+        "Incomplete Case Exclusion Count": excludedIncompleteCases.length,
         "Total Theoretical Hours": totalTheoretical,
         "Down Downtime Hours": downDowntime,
         "Limited Use Downtime Hours": limitedUseDowntime,
@@ -2242,11 +2240,11 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
       );
       const coverageIssues = C.validateCaseAssetCoverage(state.data, state.assetData);
       const resultIssues = C.validateResults(state.calculation.assetUptime);
-      const incompleteAssetIssues = state.calculation.excludedIncompleteAssets.map((row) => ({
-        Severity: "Error",
-        "Issue Type": "Incomplete In-period Asset Excluded",
+      const incompleteCaseIssues = state.calculation.excludedIncompleteCases.map((row) => ({
+        Severity: "Warning",
+        "Issue Type": "Incomplete In-period Case Excluded",
         Asset: row.Asset,
-        "Source Row": "",
+        "Source Row": row["Source Row"],
         Field: row["Required End Field"],
         Value: row.Case || row["Work Order Number"] || "",
         Description: row["Exclusion Reason"],
@@ -2255,7 +2253,7 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
         sourceIssues,
         assetMasterIssues,
         coverageIssues,
-        incompleteAssetIssues,
+        incompleteCaseIssues,
         resultIssues,
       );
       state.groupSummaries = Object.fromEntries(
