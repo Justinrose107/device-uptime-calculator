@@ -417,7 +417,7 @@ footer span:first-child { color: white; font-weight: 750; }
               <table id="result-table"><thead></thead><tbody></tbody></table>
               <div id="empty-state" class="empty-state hidden"></div>
             </div>
-            <p id="attribution-note" class="table-note">Only completed cases fully contained in the selected period are counted. Down uses Case Occurs Time through Downtime Recover Time; Limited Use uses Case Occurs Time and Service Complete Time, with downtime taken directly from Total Working Time.</p>
+            <p id="attribution-note" class="table-note">Down uses Case Occurs Time through recovery. If still down at the calculation end, count through that end only when elapsed downtime is at most 168 hours; longer ongoing cases are excluded. Limited Use requires completion within the period and uses Total Working Time.</p>
             <p id="downtime-note" class="table-note hidden">Case-level source rows remain visible for traceability. Down intervals for the same device are merged before totaling. Limited Use rows require an in-period Case Occurs Time, an in-period Service Complete Time, and a valid positive Total Working Time.</p>
             <p id="region-modality-note" class="table-note hidden">Each row combines a region with a Modality. Uptime is weighted by theoretical operation hours, using the same calculation rules as the overall result.</p>
             <div id="table-pager" class="pager hidden">
@@ -439,9 +439,9 @@ footer span:first-child { color: white; font-weight: 750; }
               <li>Eligible master-only Assets contribute theoretical hours with zero downtime.</li>
               <li>For normal master-only Assets, theoretical operation time begins at the later of the selected start and Installation End Date.</li>
               <li>A case is counted only when Case Occurs Time is on or after the device calculation start and before the selected period end.</li>
-              <li>For Down, Downtime Recover Time is required and must be earlier than the selected period end. A case that recovers after the selected period is not counted.</li>
+              <li>For Down recovered by the calculation end, use Case Occurs Time through Downtime Recover Time, without a 168-hour limit. If recovery is missing or later than the calculation end, use Case Occurs Time through the calculation end only when that elapsed time is at most 168 hours (exactly 168 is included). An ongoing case over 168 hours is excluded entirely, not capped at 168 hours.</li>
               <li>For Limited Use, Service Complete Time is required and must be earlier than the selected period end; downtime then equals Total Working Time directly.</li>
-              <li>If an in-period Down case has no valid Downtime Recover Time, or an in-period Limited Use case has no valid Service Complete Time, only that case is excluded from downtime. The Asset, its theoretical operation hours, and its other eligible completed cases remain included.</li>
+              <li>An unparseable Down recovery time is excluded rather than treated as missing. Limited Use without a valid Service Complete Time is excluded. Excluding any case retains the Asset, its theoretical operation hours, and its other eligible cases.</li>
               <li>A Limited Use row with blank, zero, negative, or invalid Total Working Time is excluded from Downtime and Uptime calculations.</li>
               <li>Down intervals belonging to the same device are merged; duplicate, overlapping, or adjacent Down time is counted only once.</li>
               <li>Limited Use is not converted into an interval and is not overlap-adjusted against Down. Total Downtime Hours = Down Downtime Hours + Limited Use Downtime Hours.</li>
@@ -1226,6 +1226,7 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
         const occurs = record["Case Occurs Time"];
         if (!occurs || occurs < actualStart || occurs >= endBoundary) return;
         const status = String(record["Device Status Before Service"] ?? "").trim().toLocaleLowerCase();
+        if (status !== "limited use") return;
         const requiredField = status === "limited use" ? "Service Complete Time" : "Downtime Recover Time";
         if (!record[`__blank__${requiredField}`] && !record[`__invalid__${requiredField}`] && record[requiredField]) return;
         excludedIncompleteCases.push({
@@ -1299,17 +1300,31 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
 
         const recover = record["Downtime Recover Time"];
         if (
-          record["__blank__Downtime Recover Time"] ||
           record["__invalid__Downtime Recover Time"] ||
-          !recover ||
-          recover < occurs ||
-          recover >= endBoundary
+          (recover && recover < occurs)
         ) return;
 
         const downtimeStart = new Date(Math.max(occurs, installation, startBoundary));
-        const downtimeEndUsed = new Date(recover);
-        const downtimeEnd = new Date(recover);
-        const basis = "Downtime Recover Time — case recovered within selected period";
+        const ongoingAtEnd = !recover || recover > endBoundary;
+        const downtimeEndUsed = new Date(ongoingAtEnd ? endBoundary : recover);
+        const downtimeEnd = downtimeEndUsed;
+        if (ongoingAtEnd && hours(occurs, endBoundary) > 168) {
+          excludedIncompleteCases.push({
+            Asset: asset,
+            Case: record.Case,
+            "Work Order Number": record["Work Order Number"],
+            "Source Row": record.__source_row,
+            "Service Status": "Down",
+            "Case Occurs Time": occurs,
+            "Required End Field": "Downtime Recover Time",
+            "Issue Type": "Ongoing Down Over 168 Hours Excluded",
+            "Exclusion Reason": `This Down case was still unresolved at the calculation end and had lasted ${hours(occurs, endBoundary).toFixed(2)} hours, exceeding 168 hours. Only this case is excluded; the Asset, theoretical hours, and other eligible cases remain included.`,
+          });
+          return;
+        }
+        const basis = ongoingAtEnd
+          ? "Calculation end — still Down at period end, elapsed downtime at most 168 hours"
+          : "Downtime Recover Time — case recovered by calculation end";
         if (downtimeEnd <= downtimeStart) return;
         downIntervals.push([downtimeStart, downtimeEnd]);
         downCaseCount += 1;
@@ -2122,13 +2137,13 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
       return { rows: state.calculation.assetUptime, columns: C.ASSET_RESULT_COLUMNS, empty: "No assets have theoretical operation time in the selected period and filters." };
     }
     if (state.activeTab === "down-asset") {
-      return { rows: state.calculation.downAssetUptime, columns: C.DOWN_RESULT_COLUMNS, empty: "No Down case both occurs and recovers within the selected period." };
+      return { rows: state.calculation.downAssetUptime, columns: C.DOWN_RESULT_COLUMNS, empty: "No eligible Down case: recovery must be by the calculation end, or ongoing downtime at that end must be at most 168 hours." };
     }
     if (state.activeTab === "limited-asset") {
       return { rows: state.calculation.limitedUseAssetUptime, columns: C.LIMITED_USE_RESULT_COLUMNS, empty: "No Limited Use case occurs and completes within the selected period with a valid positive Total Working Time." };
     }
     if (state.activeTab === "downtime") {
-      return { rows: state.calculation.downtimeDetail, columns: C.DOWNTIME_DETAIL_COLUMNS, empty: "No completed Down or Limited Use case is fully contained in the selected period." };
+      return { rows: state.calculation.downtimeDetail, columns: C.DOWNTIME_DETAIL_COLUMNS, empty: "No eligible Down or completed Limited Use case occurs within the selected period." };
     }
     if (state.activeTab === "missing") {
       return {
@@ -2242,7 +2257,7 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
       const resultIssues = C.validateResults(state.calculation.assetUptime);
       const incompleteCaseIssues = state.calculation.excludedIncompleteCases.map((row) => ({
         Severity: "Warning",
-        "Issue Type": "Incomplete In-period Case Excluded",
+        "Issue Type": row["Issue Type"] || "Incomplete In-period Case Excluded",
         Asset: row.Asset,
         "Source Row": row["Source Row"],
         Field: row["Required End Field"],
